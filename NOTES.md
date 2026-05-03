@@ -605,3 +605,87 @@ class PlannerAgent:
 | 添加新的测试问题 | `main.py` | `run_analysis("...")` |
 | 修改状态字段 | `core/state.py` | `AnalysisState` TypedDict |
 | 修改流转逻辑 | `workflow.py` | `route_after_critic()` 和 `build_workflow()` |
+
+---
+
+## 十三、架构优化记录
+
+> 原 `OPTIMIZATION_SUMMARY.md`，记录已完成的架构级优化。
+
+### 13.1 执行器（Executor）的"防爆"保护
+
+**问题：** Executor 直接执行 SQL 可能返回数百万行数据，导致内存溢出、Reporter 节点 Token 超限、系统崩溃。
+
+**解决方案（`tools/mysql_tools.py`）：**
+
+1. **自动添加 LIMIT** — 检测 SQL 是否已有 LIMIT 子句，没有则自动添加 `LIMIT 500`，可通过环境变量 `MAX_QUERY_ROWS` 配置
+2. **数据截断提示** — 数据被截断时在结果中添加警告，Reporter 基于抽样数据总结趋势
+3. **SQL 安全拦截** — 自动拦截 DROP/DELETE/UPDATE/TRUNCATE，仅允许 SELECT，可通过 `ENABLE_SQL_SAFETY_CHECK=false` 关闭（不推荐）
+
+代码位置：`tools/mysql_tools.py:_add_limit_to_sql()`, `_check_sql_safety()`
+
+### 13.2 Critic 节点的"真实验证"机制
+
+**问题：** Critic 仅用 LLM 审查 SQL，容易产生"盲目自信"的幻觉。
+
+**解决方案（`agents/agents.py:CriticAgent`）：**
+
+1. **数据库预执行验证** — 使用 `EXPLAIN <SQL>` 验证语法，不实际执行，直接捕获数据库报错
+2. **双重审查机制** — 先 EXPLAIN 验证，再 LLM 逻辑审查，两者都通过才放行
+3. **准确率提升** — 从 80%（纯 LLM 审查）提升到 99%（数据库验证），减少无效重试
+
+配置项：`ENABLE_SQL_VALIDATION=true`（默认开启）
+
+### 13.3 死循环后的"优雅降级"
+
+**问题：** 达到最大重试次数后"强制放行"错误 SQL，必然导致崩溃。
+
+**解决方案：**
+
+- 达到 `MAX_ITERATIONS` 时直接跳转到 Reporter 生成降级报告
+- Reporter 检测 `error_message` 和 `iteration_count >= MAX_ITERATIONS` 且 `verdict == REJECTED`
+- 生成友好的错误报告，说明技术阻碍并给出建议
+
+代码位置：`workflow.py:route_after_critic()`、`agents/agents.py:ReporterAgent.run()`
+
+### 13.4 新增配置项
+
+```env
+MAX_QUERY_ROWS=500                    # 最大查询行数
+ENABLE_SQL_SAFETY_CHECK=true          # 是否启用 SQL 安全检查
+ENABLE_SQL_VALIDATION=true            # 是否启用 SQL 预执行验证
+```
+
+---
+
+## 十四、文档优化记录
+
+> 原 `DOCUMENTATION_OPTIMIZATION.md`，记录 2026-04-28 的文档完善工作。
+
+### 14.1 已完成优化
+
+| 文档 | 优化前 | 优化后 | 改进 |
+| :--- | :----- | :----- | :--- |
+| README.md | 9.2 KB | 12.6 KB | +37% 内容 |
+| README_EN.md | 8.0 KB | 12.5 KB | +56% 内容 |
+| CONTRIBUTING.md | 不存在 | 5.7 KB | 新建 |
+| EXAMPLES.md | 不存在 | 11.0 KB | 新建 |
+
+总计新增 16.7 KB 文档内容，优化 6.9 KB 现有内容。
+
+### 14.2 后续优化建议
+
+**短期（1-2 周）：**
+- 为每个 Agent 编写单元测试，覆盖率 80%+
+- 创建 TROUBLESHOOTING.md 列出常见错误和解决方案
+- 添加性能基准测试（不同模型的响应时间和成本）
+
+**中期（1 个月）：**
+- 创建快速开始 / 飞书集成 / 高级配置的视频教程
+- 提供更多行业示例数据集（电商、金融、教育）
+- 支持多语言的分析报告输出
+
+**长期（3 个月+）：**
+- 创建 Discord/Slack 社区频道
+- 发布到 PyPI（`pip install`）
+- 开发插件系统，支持自定义 Agent
